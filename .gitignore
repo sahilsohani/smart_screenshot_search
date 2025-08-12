@@ -1,0 +1,17 @@
+# venv & caches
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.DS_Store
+
+# local data & models
+data/index/
+.cache/
+.cache/**
+
+# Streamlit
+.streamlit/
+
+# OS junk
+Thumbs.db

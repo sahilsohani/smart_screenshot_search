@@ -1,0 +1,12 @@
+streamlit
+Pillow
+numpy
+faiss-cpu
+sentence-transformers
+torch
+torchvision
+torchaudio
+easyocr
+opencv-python-headless
+watchdog
+imagehash
