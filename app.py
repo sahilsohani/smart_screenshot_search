@@ -324,7 +324,40 @@ def main():
             st.error("❌ Failed to load search index")
             if hasattr(st.session_state, 'searcher_error') and st.session_state.searcher_error:
                 st.error(f"Error: {st.session_state.searcher_error}")
-            st.info("💡 Try rebuilding the index using the '🗂️ Index Folder' button in the sidebar")
+            
+            # Provide recovery options
+            st.markdown("### 🔧 Recovery Options")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("🗑️ Clear Index & Rebuild", type="primary"):
+                    try:
+                        import shutil
+                        index_path = Path(index_folder)
+                        if index_path.exists():
+                            shutil.rmtree(index_path)
+                            st.success("✅ Index cleared! Click 'Index Folder' to rebuild.")
+                            # Clear the searcher cache
+                            load_searcher.clear()
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to clear index: {e}")
+            
+            with col2:
+                if st.button("📋 Show Error Details"):
+                    st.code(f"""
+Index Directory: {index_folder}
+Error: {st.session_state.searcher_error}
+
+To manually fix:
+1. Delete the index directory
+2. Rebuild using 'Index Folder' button
+
+Terminal commands:
+rm -rf "{index_folder}"
+                    """)
+            
             return
         
         # Search interface

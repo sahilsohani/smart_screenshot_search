@@ -252,6 +252,34 @@ class HybridSearcher:
             indices = np.argsort(scores)[::-1][:k]  # Top k indices
             return scores[indices], indices
     
+    def _normalize_scores_simple(self, scores: np.ndarray) -> np.ndarray:
+        """
+        Simple score normalization that preserves relative differences.
+        
+        Args:
+            scores: Raw similarity scores
+            
+        Returns:
+            Scores normalized to [0, 1] while preserving ranking
+        """
+        if len(scores) == 0:
+            return scores
+        
+        # Ensure non-negative (cosine similarity should be 0-1 for normalized vectors)
+        scores = np.maximum(scores, 0)
+        
+        # Simple min-max normalization
+        min_score = scores.min()
+        max_score = scores.max()
+        
+        if max_score == min_score:
+            return np.ones_like(scores) * 0.5
+        
+        # Just normalize to 0-1 range, preserving relative differences
+        normalized = (scores - min_score) / (max_score - min_score)
+        
+        return normalized
+    
     def _create_snippet(self, ocr_text: str, max_length: int = 300) -> str:
         """
         Create a text snippet from OCR text.
@@ -282,15 +310,17 @@ class HybridSearcher:
         return snippet + "..." if len(text) > max_length else snippet
     
     def search(self, query: str, top_k: int = 12, alpha: float = 0.6, 
-               image_query: Optional[Union[str, Path]] = None) -> List[Dict[str, Any]]:
+               image_query: Optional[Union[str, Path]] = None,
+               min_score_threshold: float = 0.08) -> List[Dict[str, Any]]:
         """
-        Perform hybrid search combining text and image similarities.
+        Perform hybrid search combining text and image similarities with quality filtering.
         
         Args:
             query: Text query string
             top_k: Number of results to return
             alpha: Weight for text vs image scores (0.0 = image only, 1.0 = text only)
             image_query: Optional path to image for image-based search
+            min_score_threshold: Minimum score threshold for results (default: 0.15)
             
         Returns:
             List of result dictionaries with keys: path, score, tags, snippet, filename
@@ -304,8 +334,8 @@ class HybridSearcher:
         if top_k <= 0:
             raise ValueError(f"top_k must be positive, got {top_k}")
         
-        # Search more items initially to allow for better filtering
-        search_k = min(max(top_k * 4, 50), self.metadata['num_images'])
+        # Search a reasonable number - not too many to avoid noise
+        search_k = min(max(top_k * 3, 50), self.metadata['num_images'])
         
         # Encode queries
         text_embedding = self._encode_text_query(query)
@@ -321,21 +351,35 @@ class HybridSearcher:
         text_scores, text_indices = self._search_text(text_embedding, search_k)
         image_scores, image_indices = self._search_image(image_embedding, search_k)
         
+        # Use simple normalization to preserve score differences
+        text_scores_norm = self._normalize_scores_simple(text_scores)
+        image_scores_norm = self._normalize_scores_simple(image_scores)
+        
         # Combine results from both searches
         combined_scores = {}
         
-        # Add text results
-        for score, idx in zip(text_scores, text_indices):
-            if idx < len(self.metadata['items']) and score >= 0.05:  # Basic threshold
-                combined_scores[idx] = {'text_score': score, 'image_score': 0.0}
+        # Add text results - use raw scores for filtering but normalized for final computation
+        for score_norm, score_raw, idx in zip(text_scores_norm, text_scores, text_indices):
+            if idx < len(self.metadata['items']) and score_raw >= 0.05:  # Filter on raw similarity
+                combined_scores[idx] = {
+                    'text_score': score_norm, 
+                    'image_score': 0.0, 
+                    'raw_text_score': score_raw
+                }
         
-        # Add image results
-        for score, idx in zip(image_scores, image_indices):
-            if idx < len(self.metadata['items']) and score >= 0.05:  # Basic threshold
+        # Add image results - use raw scores for filtering but normalized for final computation
+        for score_norm, score_raw, idx in zip(image_scores_norm, image_scores, image_indices):
+            if idx < len(self.metadata['items']) and score_raw >= 0.05:  # Filter on raw similarity
                 if idx in combined_scores:
-                    combined_scores[idx]['image_score'] = score
+                    combined_scores[idx]['image_score'] = score_norm
+                    combined_scores[idx]['raw_image_score'] = score_raw
                 else:
-                    combined_scores[idx] = {'text_score': 0.0, 'image_score': score}
+                    combined_scores[idx] = {
+                        'text_score': 0.0, 
+                        'image_score': score_norm, 
+                        'raw_text_score': 0.0, 
+                        'raw_image_score': score_raw
+                    }
         
         # Compute final scores and create results
         results = []
@@ -344,17 +388,21 @@ class HybridSearcher:
             # Hybrid score: alpha * text + (1-alpha) * image
             final_score = alpha * scores['text_score'] + (1 - alpha) * scores['image_score']
             
-            # Basic relevance filtering
-            min_threshold = 0.08
-            if final_score < min_threshold:
-                continue
-                
-            # For text queries, prefer results with some text relevance
-            if query.strip() and alpha > 0.5 and scores['text_score'] < 0.08:
+            # Apply threshold filter on final score
+            if final_score < min_score_threshold:
                 continue
             
             # Get item metadata
             item = self.metadata['items'][idx]
+            
+            # Additional quality check: if query has meaningful text, ensure some text relevance
+            if query.strip() and alpha > 0.3:  # Only if we care about text significantly
+                raw_text_score = scores.get('raw_text_score', 0)
+                raw_image_score = scores.get('raw_image_score', 0)
+                
+                # For text queries, require either decent text match OR very strong image match
+                if raw_text_score < 0.1 and raw_image_score < 0.4:
+                    continue
             
             # Create result
             result = {
@@ -372,19 +420,21 @@ class HybridSearcher:
             
             results.append(result)
         
-        # Sort by final score (descending)
+        # Sort by final score (descending) and return top k
         results.sort(key=lambda x: x['score'], reverse=True)
         
-        # Boost results that contain query words
+        # Additional post-processing: boost results that match query semantically
         if query.strip() and results:
             query_words = set(query.lower().split())
             
             for result in results:
+                # Check if query words appear in OCR text or tags
                 text_content = (result.get('snippet', '') + ' ' + ' '.join(result.get('tags', []))).lower()
                 word_matches = sum(1 for word in query_words if word in text_content)
                 
                 if word_matches > 0:
-                    boost = min(0.15, word_matches * 0.05)
+                    # Boost score slightly for direct word matches
+                    boost = min(0.1, word_matches * 0.03)
                     result['score'] = min(1.0, result['score'] + boost)
             
             # Re-sort after boosting
@@ -435,6 +485,7 @@ if __name__ == "__main__":
     parser.add_argument('--alpha', type=float, default=0.6, help='Text/image weight (0.0-1.0)')
     parser.add_argument('--top-k', type=int, default=5, help='Number of results')
     parser.add_argument('--image', help='Optional image query path')
+    parser.add_argument('--min-score', type=float, default=0.15, help='Minimum score threshold')
     
     args = parser.parse_args()
     
@@ -450,13 +501,15 @@ if __name__ == "__main__":
         print(f"\n=== Search Results ===")
         print(f"Query: '{args.query}'")
         print(f"Alpha: {args.alpha} (text weight)")
+        print(f"Min Score Threshold: {args.min_score}")
         
         # Perform search
         results = searcher.search(
             query=args.query, 
             top_k=args.top_k, 
             alpha=args.alpha,
-            image_query=args.image
+            image_query=args.image,
+            min_score_threshold=args.min_score
         )
         
         # Display results
@@ -469,7 +522,7 @@ if __name__ == "__main__":
             print(f"   Path: {result['path']}")
         
         if not results:
-            print("No results found.")
+            print("No results found above the minimum threshold.")
             
     except Exception as e:
         print(f"Search failed: {e}")

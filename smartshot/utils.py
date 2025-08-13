@@ -13,6 +13,13 @@ from typing import List, Optional, Tuple, Union
 
 from PIL import Image, ImageOps
 
+# Optional import for perceptual hashing
+try:
+    import imagehash
+    HAVE_IMAGEHASH = True
+except ImportError:
+    HAVE_IMAGEHASH = False
+
 
 # Supported image extensions
 IMG_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp'}
@@ -78,6 +85,49 @@ def file_sha1(path: Union[str, Path]) -> str:
         raise IOError(f"Error reading file {file_path}: {e}")
     
     return sha1_hash.hexdigest()
+
+
+def compute_phash(image_path: Union[str, Path]) -> str:
+    """
+    Compute perceptual hash of an image for duplicate detection.
+    
+    Args:
+        image_path: Path to the image file
+        
+    Returns:
+        Perceptual hash as hexadecimal string
+        
+    Raises:
+        ImportError: If imagehash library is not available
+        FileNotFoundError: If the image file doesn't exist
+        Exception: If the image cannot be processed
+        
+    Example:
+        >>> compute_phash("screenshot.png")
+        'a1b2c3d4e5f60789'
+    """
+    if not HAVE_IMAGEHASH:
+        raise ImportError("imagehash library is required for perceptual hashing. Install with: pip install imagehash")
+    
+    file_path = Path(image_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Image file not found: {file_path}")
+    
+    try:
+        with Image.open(file_path) as img:
+            # Convert to RGB if necessary for consistent hashing
+            if img.mode not in ('RGB', 'L'):
+                img = img.convert('RGB')
+            
+            # Apply EXIF orientation if present
+            img = ImageOps.exif_transpose(img)
+            
+            # Compute perceptual hash
+            phash = imagehash.phash(img)
+            return str(phash)
+            
+    except Exception as e:
+        raise Exception(f"Error computing perceptual hash for {file_path}: {e}")
 
 
 def preview_image(path: Union[str, Path], max_px: int = 800) -> Image.Image:
@@ -331,8 +381,27 @@ if __name__ == "__main__":
     finally:
         os.unlink(temp_file_path)
     
-    # Test 3: preview_image
-    print("\n3. Testing preview_image...")
+    # Test 3: compute_phash (if available)
+    print("\n3. Testing compute_phash...")
+    if HAVE_IMAGEHASH:
+        # Create a simple test image
+        test_img = Image.new('RGB', (100, 100), color='red')
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_img:
+            test_img.save(temp_img.name)
+            temp_img_path = temp_img.name
+        
+        try:
+            phash = compute_phash(temp_img_path)
+            print(f"   Perceptual hash: {phash}")
+            assert len(phash) == 16, f"Expected 16-character hash, got {len(phash)}"
+            print("   ✓ Perceptual hash computation correct")
+        finally:
+            os.unlink(temp_img_path)
+    else:
+        print("   ⚠ imagehash not available, skipping perceptual hash test")
+    
+    # Test 4: preview_image
+    print("\n4. Testing preview_image...")
     # Create a simple test image
     test_img = Image.new('RGB', (1000, 600), color='red')
     with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_img:
@@ -349,15 +418,15 @@ if __name__ == "__main__":
     finally:
         os.unlink(temp_img_path)
     
-    # Test 4: pick_default_screenshot_dir
-    print("\n4. Testing pick_default_screenshot_dir...")
+    # Test 5: pick_default_screenshot_dir
+    print("\n5. Testing pick_default_screenshot_dir...")
     default_dir = pick_default_screenshot_dir()
     print(f"   Default screenshot directory: {default_dir}")
     if default_dir:
         print(f"   Directory exists: {default_dir.exists()}")
     
-    # Test 5: simple_tags
-    print("\n5. Testing simple_tags...")
+    # Test 6: simple_tags
+    print("\n6. Testing simple_tags...")
     
     test_cases = [
         ("Total: $45.99 Thank you for your purchase", "Receipt"),
